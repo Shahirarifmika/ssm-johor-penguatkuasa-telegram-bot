@@ -56,37 +56,95 @@ def call_openai(messages):
     )
     return resp.choices[0].message["content"]
 
+# --- Background processor: does ALL sending & OpenAI calls ---
+def process_and_reply(data: dict):
+    try:
+        # Basic validation
+        if not isinstance(data, dict):
+            logger.warning("Background: data not dict")
+            return
+
+        # Extract message
+        message = data.get("message") or data.get("edited_message")
+        if not message:
+            logger.info("Background: no message field")
+            return
+
+        chat = message.get("chat", {})
+        chat_id = chat.get("id")
+        if chat_id is None:
+            logger.warning("Background: no chat_id")
+            return
+
+        text = message.get("text", "") or message.get("caption", "")
+
+        # 1) Send initial short ack (background) - keep small & robust
+        try:
+            send_telegram_message(chat_id, "Memproses permintaan anda... Sila tunggu sebentar.")
+        except Exception:
+            # Already logged inside send_telegram_message
+            pass
+
+        # 2) Build messages & call OpenAI
+        try:
+            messages = build_openai_messages(text)
+            reply = call_openai(messages)
+        except Exception as e:
+            logger.exception("OpenAI call failed: %s", e)
+            send_telegram_message(chat_id, "Maaf, berlaku ralat pada perkhidmatan AI. Sila cuba lagi kemudian.")
+            return
+
+        # 3) Send reply (split if terlalu panjang)
+        try:
+            MAX_LEN = 4000
+            if len(reply) <= MAX_LEN:
+                send_telegram_message(chat_id, reply)
+            else:
+                parts = reply.split("\n\n")
+                buffer = ""
+                for p in parts:
+                    if len(buffer) + len(p) + 2 > MAX_LEN:
+                        send_telegram_message(chat_id, buffer.strip())
+                        buffer = p + "\n\n"
+                    else:
+                        buffer += p + "\n\n"
+                if buffer.strip():
+                    send_telegram_message(chat_id, buffer.strip())
+        except Exception as e:
+            logger.exception("Failed to send reply: %s", e)
+            # final fallback
+            try:
+                send_telegram_message(chat_id, "Maaf, tidak dapat menghantar jawapan penuh. Sila hubungi pejabat SSM.")
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.exception("Unhandled error in background processor: %s", e)
+
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request, background: BackgroundTasks):
-    data = await request.json()
-    logger.info("Received webhook: keys=%s", list(data.keys()))
-    if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
-        # quick ack
-        send_telegram_message(chat_id, "Memproses permintaan anda... Sila tunggu sebentar.")
-        # background process
-        def process_and_reply(chat_id, text):
-            try:
-                messages = build_openai_messages(text)
-                reply = call_openai(messages)
-                # split long replies for Telegram limit
-                MAX_LEN = 4000
-                if len(reply) <= MAX_LEN:
-                    send_telegram_message(chat_id, reply)
-                else:
-                    parts = reply.split("\n\n")
-                    buffer = ""
-                    for p in parts:
-                        if len(buffer) + len(p) + 2 > MAX_LEN:
-                            send_telegram_message(chat_id, buffer.strip())
-                            buffer = p + "\n\n"
-                        else:
-                            buffer += p + "\n\n"
-                    if buffer.strip():
-                        send_telegram_message(chat_id, buffer.strip())
-            except Exception as e:
-                logger.exception("Error processing message: %s", e)
-                send_telegram_message(chat_id, "Maaf, berlaku ralat semasa memproses permintaan. Sila cuba lagi kemudian.")
-        background.add_task(process_and_reply, chat_id, text)
+    """
+    ACK cepat: parse JSON (safely), queue background task and RETURN 200 immediately.
+    All heavy work is in process_and_reply (background).
+    """
+    try:
+        data = await request.json()
+    except Exception as e:
+        logger.exception("Invalid JSON from Telegram: %s", e)
+        # Return 200 so Telegram stops retrying bad payloads
+        return {"ok": True}
+
+    # Log minimal keys to help debug later
+    try:
+        logger.info("Received webhook (background queued). keys=%s", list(data.keys()))
+    except Exception:
+        pass
+
+    # Queue the heavy work to background
+    try:
+        background.add_task(process_and_reply, data)
+    except Exception as e:
+        logger.exception("Failed to schedule background task: %s", e)
+        # still return 200 to avoid Telegram retries
     return {"ok": True}
