@@ -1,6 +1,8 @@
 import os
 import logging
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from fastapi import FastAPI, Request, BackgroundTasks
 import openai
 
@@ -28,26 +30,29 @@ openai.api_key = OPENAI_API_KEY
 TG_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # ======================================================
+# REUSABLE HTTP SESSION (improve perf + resilience)
+# ======================================================
+# Create a requests Session and mount a Retry adapter so transient network errors
+# are retried a few times before failing.
+SESSION = requests.Session()
+
+retries = Retry(
+    total=3,                # number of total retries
+    backoff_factor=0.5,     # sleep between retries: 0.5s, 1s, 2s...
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+)
+adapter = HTTPAdapter(max_retries=retries)
+SESSION.mount("https://", adapter)
+SESSION.mount("http://", adapter)
+
+# ======================================================
 # FASTAPI APP
 # ======================================================
 app = FastAPI()
 
 # ======================================================
-# LOAD SYSTEM INSTRUCTIONS
-# ======================================================
-SYSTEM_INSTRUCTION = ""
-try:
-    with open("instructions.txt", "r", encoding="utf-8") as f:
-        SYSTEM_INSTRUCTION = f.read().strip()
-except Exception:
-    logger.warning("instructions.txt not found — using fallback.")
-    SYSTEM_INSTRUCTION = (
-        "Anda ialah Penguatkuasa SSM Johor. "
-        "Jawab berdasarkan garis panduan rasmi SSM Johor."
-    )
-
-# ======================================================
-# SAFE TELEGRAM SENDER
+# SAFE TELEGRAM SENDER (uses global SESSION)
 # ======================================================
 def send_telegram_message(chat_id: int, text: str):
     payload = {
@@ -56,101 +61,9 @@ def send_telegram_message(chat_id: int, text: str):
         "parse_mode": "HTML"
     }
     try:
-        resp = requests.post(f"{TG_API_URL}/sendMessage", json=payload, timeout=10)
+        # use SESSION.post (faster, reuses connections, retry-able)
+        resp = SESSION.post(f"{TG_API_URL}/sendMessage", json=payload, timeout=10)
         if not resp.ok:
             logger.error("Telegram sendMessage failed: %s %s", resp.status_code, resp.text)
     except Exception as e:
         logger.exception("send_telegram_message error: %s", e)
-
-
-# ======================================================
-# BUILD OPENAI MESSAGE
-# ======================================================
-def build_openai_messages(user_text: str):
-    return [
-        {"role": "system", "content": SYSTEM_INSTRUCTION},
-        {"role": "user", "content": user_text}
-    ]
-
-
-# ======================================================
-# CALL OPENAI (resilient version)
-# ======================================================
-def call_openai(messages):
-    resp = openai.ChatCompletion.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=0.0,
-        max_tokens=1200
-    )
-    return resp.choices[0].message["content"]
-
-
-# ======================================================
-# BACKGROUND PROCESSOR
-# ======================================================
-def process_and_reply(data: dict):
-    try:
-        message = data.get("message") or data.get("edited_message")
-        if not message:
-            return
-
-        chat_id = message["chat"]["id"]
-        text = message.get("text") or message.get("caption", "")
-
-        # Initial ACK
-        send_telegram_message(chat_id, "Memproses permintaan anda... ✔️")
-
-        # OpenAI
-        messages = build_openai_messages(text)
-        ai_reply = call_openai(messages)
-
-        # Telegram limit handling
-        MAX_LEN = 3900
-        if len(ai_reply) <= MAX_LEN:
-            send_telegram_message(chat_id, ai_reply)
-        else:
-            buffer = ""
-            for part in ai_reply.split("\n\n"):
-                if len(buffer) + len(part) + 2 > MAX_LEN:
-                    send_telegram_message(chat_id, buffer.strip())
-                    buffer = part + "\n\n"
-                else:
-                    buffer += part + "\n\n"
-            if buffer.strip():
-                send_telegram_message(chat_id, buffer.strip())
-
-    except Exception as e:
-        logger.exception("Error in process_and_reply: %s", e)
-        send_telegram_message(chat_id, "Maaf, berlaku ralat semasa memproses.")
-
-
-# ======================================================
-# ROOT ROUTES (prevent 502)
-# ======================================================
-@app.get("/")
-async def root():
-    return {"status": "SSM Telegram Bot Running ✔️"}
-
-@app.get("/favicon.ico")
-async def favicon():
-    return {}
-
-
-# ======================================================
-# TELEGRAM WEBHOOK
-# ======================================================
-@app.post("/webhook")
-async def telegram_webhook(request: Request, background: BackgroundTasks):
-    try:
-        data = await request.json()
-    except Exception:
-        return {"ok": True}  # Avoid retries
-
-    logger.info("Webhook received: keys=%s", list(data.keys()))
-
-    # Queue worker
-    background.add_task(process_and_reply, data)
-
-    # ❗ MOST IMPORTANT — return immediately
-    return {"ok": True}
