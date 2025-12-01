@@ -147,8 +147,7 @@ Anda tidak boleh meminta:
 ✘ nombor IC  
 ✘ nombor pasport  
 ✘ alamat rumah  
-✘ butiran bank  
-✘ nombor kompaun  
+✘ butiran bank   
 ✘ bukti pembayaran  
 
 ========================================================
