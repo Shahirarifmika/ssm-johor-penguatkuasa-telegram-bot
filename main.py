@@ -1,4 +1,4 @@
-# main.py (FINAL VERSION – default gpt-4o)
+# main.py (FINAL VERSION – default gpt-4o) with cheatcode
 import os
 import logging
 import requests
@@ -113,7 +113,7 @@ def is_welcome_trigger(msg: str):
     return t in WELCOME_TRIGGERS
 
 # ======================================================
-# MAIN MESSAGE PROCESSOR
+# MAIN MESSAGE PROCESSOR (with cheatcode)
 # ======================================================
 def process_and_reply(data: dict):
     try:
@@ -135,6 +135,28 @@ def process_and_reply(data: dict):
             send_telegram_message(chat_id, WELCOME_TEXT)
             return
 
+        # If empty text, stop
+        if not text.strip():
+            return
+
+        # ======================================================
+        # CHEATCODE: respond instantly for known names (no OpenAI)
+        # ======================================================
+        # Trigger words: case-insensitive — add/remove as needed
+        cheat_keywords = [
+            "sharif", "syarif", "ayep", "ayep?", "pak tam", "paktam", "paktham", "pak tam?"
+        ]
+        lowered = text.lower()
+        if any(k in lowered for k in cheat_keywords):
+            custom_reply = (
+                "Ya, saya kenal pegawai tersebut.\n\n"
+                "Beliau merupakan pegawai kompaun yang sangat berwibawa, "
+                "berpengalaman, dan menjalankan tugas dengan cemerlang. "
+                "Pendek kata, semua kerja boleh tapau. 💯"
+            )
+            send_telegram_message(chat_id, custom_reply)
+            return  # IMPORTANT: do not call OpenAI after cheatcode
+
         # Acknowledge (optional)
         try:
             send_telegram_message(
@@ -143,10 +165,6 @@ def process_and_reply(data: dict):
             )
         except:
             logger.exception("Failed ack send")
-
-        # Empty text? stop
-        if not text.strip():
-            return
 
         # ———————————————
         # CALL OPENAI
