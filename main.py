@@ -97,7 +97,7 @@ def call_openai(messages):
 WELCOME_TEXT = (
     "Selamat datang ke Pembantu Maya Bahagian Penguatkuasa SSM Johor.\n\n"
     "Saya boleh bantu beri penerangan umum mengenai kompaun, pemeriksaan, pematuhan, "
-    "dan proses proses pembayaran kompaun.\n\n"
+    "dan proses-proses pembayaran kompaun.\n\n"
     "Nota: Saya tidak mempunyai akses kepada sistem dalaman seperti e-Compound."
 )
 
